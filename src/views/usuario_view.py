@@ -1,10 +1,11 @@
 from flask_restful import Resource
 from marshmallow import ValidationError
 from src.schemas import usuario_schema
+from src.entities import usuario
 from flask import request, jsonify, make_response
 from src.services import usuario_services
 from src import api
-from src.models.usuario_model import Usuario
+
 
 # POST-GET-PUT-DELETE
 # Lidar com todos os usuarios
@@ -31,7 +32,7 @@ class UsuarioList(Resource):
 
         try:
             # criação do novo usuario no banco
-            novo_usuario = Usuario(
+            novo_usuario = usuario.Usuario(
                 nome=dados['nome'],
                 email=dados['email'],
                 telefone=dados['telefone'],
@@ -46,3 +47,27 @@ class UsuarioList(Resource):
 
 
 api.add_resource(UsuarioList, '/usuario')
+
+class UsuarioResource(Resource):
+    def get(self, id_usuario):
+        usuario_encontrado = usuario_services.listar_usuario_id(id_usuario)
+        if not usuario_encontrado:
+            return make_response(jsonify({'message': 'Usuário não encontrado'}), 404)
+        
+        schema = usuario_schema.UsuarioSchema()
+        return make_response(jsonify(schema.dump(usuario_encontrado)), 200)
+    
+    def put(self, id_usuario):
+        ...
+    def delete(self, id_usuario):
+        usuario_encontrado = usuario_services.listar_usuario_id(id_usuario)
+        if not usuario_encontrado:
+            return make_response(jsonify({'message': 'Usuário não encontrado'}), 404)
+        try:
+            usuario_services.excluir_usuario(id_usuario)
+            return make_response(jsonify({'message':'Usuario excluído com sucesso!'}), 200)
+        except Exception as e:
+            return make_response(jsonify({'message':str(e)}),400)
+        
+
+api.add_resource(UsuarioResource, '/usuario/<int:id_usuario>') # /usuario/1
