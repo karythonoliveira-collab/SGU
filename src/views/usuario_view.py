@@ -12,26 +12,24 @@ from src import api
 class UsuarioList(Resource):
     def get(self):
         usuarios = usuario_services.listar_usuario()
+        schema = usuario_schema.UsuarioSchema(many=True)
 
         if not usuarios:
-            return make_response(jsonify({'message':'Não existe usuarios!'}))
-        
-        schema = usuario_schema.UsuarioSchema(many=True)
-        return make_response(jsonify(schema.dump(usuarios)), 200)
+            return {'success': False, 'data': [], 'message': 'Não existe usuários!'}, 200
+
+        return {'success': True, 'data': schema.dump(usuarios), 'message': 'Lista de usuários'}, 200
 
     def post(self):
         schema = usuario_schema.UsuarioSchema()
-
         try:
             dados = schema.load(request.json)
         except ValidationError as err:
-            return make_response(jsonify(err.messages), 400)
+            return {'success': False, 'data': err.messages, 'message': 'Erro de validação'}, 400
         
         if usuario_services.listar_usuario_email(dados['email']):
-            return make_response(jsonify({'message': 'Email já cadastrado'}), 400)
+            return {'success': False, 'data': {}, 'message': 'Email já cadastrado'}, 400
 
         try:
-            # criação do novo usuario no banco
             novo_usuario = usuario.Usuario(
                 nome=dados['nome'],
                 email=dados['email'],
@@ -39,12 +37,10 @@ class UsuarioList(Resource):
                 senha=dados['senha']
             )
             resultado = usuario_services.cadastrar_usuario(novo_usuario)
-            return make_response(jsonify(schema.dump(resultado)), 201)
+            return {'success': True, 'data': schema.dump(resultado), 'message': 'Usuário criado com sucesso'}, 201
 
         except Exception as e:
-            return make_response(jsonify({'message':str(e)}), 400)
-
-
+            return {'success': False, 'data': {}, 'message': str(e)}, 400
 
 api.add_resource(UsuarioList, '/usuario')
 
@@ -52,22 +48,37 @@ class UsuarioResource(Resource):
     def get(self, id_usuario):
         usuario_encontrado = usuario_services.listar_usuario_id(id_usuario)
         if not usuario_encontrado:
-            return make_response(jsonify({'message': 'Usuário não encontrado'}), 404)
+            return {'success': False, 'data': {}, 'message': 'Usuário não encontrado'}, 404
         
         schema = usuario_schema.UsuarioSchema()
-        return make_response(jsonify(schema.dump(usuario_encontrado)), 200)
+        return {'success': True, 'data': schema.dump(usuario_encontrado), 'message': 'Usuário encontrado'}, 200
     
     def put(self, id_usuario):
-        ...
+        usuario_encontrado = usuario_services.listar_usuario_id(id_usuario)
+        if not usuario_encontrado:
+            return {'success': False, 'data': {}, 'message': 'Usuário não encontrado'}, 404
+
+        schema = usuario_schema.UsuarioSchema()
+        try:
+            dados = schema.load(request.json)
+        except ValidationError as err:
+            return {'success': False, 'data': err.messages, 'message': 'Erro de validação'}, 400
+
+        try:
+            resultado = usuario_services.editar_usuario(id_usuario, dados)
+            return {'success': True, 'data': schema.dump(resultado), 'message': 'Usuário atualizado com sucesso'}, 200
+        except Exception as e:
+            return {'success': False, 'data': {}, 'message': str(e)}, 400
+
     def delete(self, id_usuario):
         usuario_encontrado = usuario_services.listar_usuario_id(id_usuario)
         if not usuario_encontrado:
-            return make_response(jsonify({'message': 'Usuário não encontrado'}), 404)
+            return {'success': False, 'data': {}, 'message': 'Usuário não encontrado'}, 404
         try:
             usuario_services.excluir_usuario(id_usuario)
-            return make_response(jsonify({'message':'Usuario excluído com sucesso!'}), 200)
+            return {'success': True, 'data': {}, 'message': 'Usuário excluído com sucesso'}, 200
         except Exception as e:
-            return make_response(jsonify({'message':str(e)}),400)
-        
+            return {'success': False, 'data': {}, 'message': str(e)}, 400
+
 
 api.add_resource(UsuarioResource, '/usuario/<int:id_usuario>') # /usuario/1
