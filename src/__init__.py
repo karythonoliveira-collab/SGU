@@ -20,4 +20,4 @@ def create_tables():
 
 from .models import agendamento_model, login_model, profissional_model, servicos_model, usuario_model
 # TODO: Importar as views para a API encontrar as Rotas
-from .views import usuario_view
+from .views import usuario_view, profissional_view, servico_view
