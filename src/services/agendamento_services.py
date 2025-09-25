@@ -1,14 +1,15 @@
 """
 Service para gerenciamento de agendamentos
-Contém toda a lógica de negócio relacionada aos agendamentos
+Adaptado para funcionar com SQLAlchemy Models e Marshmallow Schemas
 """
 
 from datetime import datetime, timedelta, time
-from typing import List, Dict, Optional, Tuple
-from models.agendamento_model import AgendamentoModel
-from models.servicos_model import ServicoModel
-from models.profissional_model import ProfissionalModel
-from models.usuario_model import UsuarioModel
+from typing import List, Dict, Optional
+from src.models.agendamento_model import AgendamentoModel
+from src.models.servicos_model import ServicoModel
+from src.models.profissional_model import ProfissionalModel
+from src.models.usuario_model import UsuarioModel
+from src import db
 
 
 class AgendamentoService:
@@ -22,294 +23,372 @@ class AgendamentoService:
     HORA_ALMOCO_INICIO = 12  # 12h
     HORA_ALMOCO_FIM = 13  # 13h
     
-    # Durações dos serviços em minutos
-    DURACAO_SERVICOS = {
-        'alisamento': 30,
-        'corte tesoura': 60,
-        'corte maquina': 60,
-        'barba': 30,
-        'sobrancelha': 10,
-        'pintura': 120
-    }
-    
-    @staticmethod
-    def criar_agendamento(dt_atendimento: datetime, id_user: int, 
-                         id_profissional: int, servicos_ids: List[int],
-                         observacoes: str = None) -> Dict:
+    # Duração padrão em minutos (fallback caso não esteja no banco)
+    DURACAO_PADRAO = 60
 
-        try:
-            # Validações básicas
-            if not AgendamentoService._validar_dados_basicos(
-                dt_atendimento, id_user, id_profissional, servicos_ids):
-                return {"erro": "Dados inválidos fornecidos"}
-            
-            # Verificar se a data não é no passado
-            if dt_atendimento <= datetime.utcnow():
-                return {"erro": "Não é possível agendar para datas passadas"}
+
+def _obter_duracao_servico(servico):
+    """Obtém duração do serviço do banco ou usa fallback"""
+    # Primeiro tenta pegar do campo duracao
+    if hasattr(servico, 'duracao') and servico.duracao:
+        return servico.duracao
+    
+    # Se não existir, usa duração padrão
+    return AgendamentoService.DURACAO_PADRAO
+
+
+def listar_agendamentos():
+    """Lista todos os agendamentos"""
+    try:
+        return AgendamentoModel.query.all()
+    except Exception as e:
+        raise Exception(f"Erro ao listar agendamentos: {str(e)}")
+
+
+def listar_agendamento_id(agendamento_id: int):
+    """Lista um agendamento específico por ID"""
+    try:
+        return AgendamentoModel.query.get(agendamento_id)
+    except Exception as e:
+        raise Exception(f"Erro ao buscar agendamento: {str(e)}")
+
+
+def cadastrar_agendamento(novo_agendamento):
+    """
+    Cadastra um novo agendamento com todas as validações de negócio
+    """
+    try:
+        # Validações básicas
+        if not _validar_dados_basicos(
+            novo_agendamento.dt_atendimento, 
+            novo_agendamento.id_user,
+            novo_agendamento.id_profissional, 
+            novo_agendamento.id_servico
+        ):
+            raise Exception("Dados inválidos fornecidos")
+        
+        # Verificar se a data não é no passado
+        if novo_agendamento.dt_atendimento <= datetime.now():
+            raise Exception("Não é possível agendar para datas passadas")
+        
+        # Verificar horário de funcionamento
+        if not _verificar_horario_funcionamento(novo_agendamento.dt_atendimento):
+            raise Exception("Horário fora do funcionamento do estabelecimento")
+        
+        # Verificar se o usuário existe
+        usuario = UsuarioModel.query.get(novo_agendamento.id_user)
+        if not usuario:
+            raise Exception("Usuário não encontrado")
+        
+        # Verificar se o profissional existe
+        profissional = ProfissionalModel.query.get(novo_agendamento.id_profissional)
+        if not profissional:
+            raise Exception("Profissional não encontrado")
+        
+        # Verificar se o serviço existe e calcular duração
+        servico = ServicoModel.query.get(novo_agendamento.id_servico)
+        if not servico:
+            raise Exception("Serviço não encontrado")
+        
+        # Calcular duração e horário de fim usando o banco de dados
+        duracao_servico = _obter_duracao_servico(servico)
+        dt_fim = novo_agendamento.dt_atendimento + timedelta(minutes=duracao_servico)
+        
+        # Verificar disponibilidade de horário
+        if not _verificar_disponibilidade(
+            novo_agendamento.id_profissional, 
+            novo_agendamento.dt_atendimento, 
+            dt_fim
+        ):
+            raise Exception("Horário não disponível para o profissional")
+        
+        # Se valor_total não foi fornecido, usar o preço do serviço
+        if novo_agendamento.valor_total == 0.00:
+            novo_agendamento.valor_total = float(servico.valor)
+        
+        # Salvar no banco
+        db.session.add(novo_agendamento)
+        db.session.commit()
+        
+        return novo_agendamento
+        
+    except Exception as e:
+        db.session.rollback()
+        raise Exception(str(e))
+
+
+def editar_agendamento(agendamento_id: int, dados_atualizados):
+    """
+    Edita um agendamento existente
+    """
+    try:
+        agendamento_existente = AgendamentoModel.query.get(agendamento_id)
+        if not agendamento_existente:
+            raise Exception("Agendamento não encontrado")
+        
+        # Verificar se pode ser editado (não cancelado/concluído)
+        if agendamento_existente.status in ['cancelado', 'concluido']:
+            raise Exception("Não é possível editar agendamento cancelado ou concluído")
+        
+        # Validações se estiver alterando data/hora
+        if dados_atualizados.dt_atendimento != agendamento_existente.dt_atendimento:
+            # Verificar se a nova data não é no passado
+            if dados_atualizados.dt_atendimento <= datetime.utcnow():
+                raise Exception("Não é possível agendar para datas passadas")
             
             # Verificar horário de funcionamento
-            if not AgendamentoService._verificar_horario_funcionamento(dt_atendimento):
-                return {"erro": "Horário fora do funcionamento do estabelecimento"}
+            if not _verificar_horario_funcionamento(dados_atualizados.dt_atendimento):
+                raise Exception("Horário fora do funcionamento do estabelecimento")
+        
+        # Validações se estiver alterando profissional ou serviço
+        if (dados_atualizados.id_profissional != agendamento_existente.id_profissional or
+            dados_atualizados.id_servico != agendamento_existente.id_servico or
+            dados_atualizados.dt_atendimento != agendamento_existente.dt_atendimento):
             
-            # Buscar serviços e calcular duração total
-            servicos = []
-            duracao_total = 0
-            valor_total = 0
+            # Verificar se o profissional existe
+            profissional = ProfissionalModel.query.get(dados_atualizados.id_profissional)
+            if not profissional:
+                raise Exception("Profissional não encontrado")
             
-            for servico_id in servicos_ids:
-                servico = ServicoModel.find_by_id(servico_id)
-                if not servico:
-                    return {"erro": f"Serviço com ID {servico_id} não encontrado"}
-                
-                servicos.append(servico)
-                duracao_total += AgendamentoService.DURACAO_SERVICOS.get(
-                    servico.nome.lower(), 60)  # Default 60min se não encontrar
-                valor_total += float(servico.preco)
+            # Verificar se o serviço existe
+            servico = ServicoModel.query.get(dados_atualizados.id_servico)
+            if not servico:
+                raise Exception("Serviço não encontrado")
             
-            # Verificar disponibilidade de horário
-            dt_fim = dt_atendimento + timedelta(minutes=duracao_total)
-            if not AgendamentoService._verificar_disponibilidade(
-                id_profissional, dt_atendimento, dt_fim):
-                return {"erro": "Horário não disponível para o profissional"}
+            # Calcular duração e verificar disponibilidade
+            duracao_servico = _obter_duracao_servico(servico)
+            dt_fim = dados_atualizados.dt_atendimento + timedelta(minutes=duracao_servico)
             
-            # Criar agendamentos (um para cada serviço)
-            agendamentos_criados = []
-            dt_atual = dt_atendimento
-            
-            for i, servico in enumerate(servicos):
-                duracao_servico = AgendamentoService.DURACAO_SERVICOS.get(
-                    servico.nome.lower(), 60)
-                
-                agendamento = AgendamentoModel(
-                    dt_atendimento=dt_atual,
-                    id_user=id_user,
-                    id_profissional=id_profissional,
-                    id_servico=servico.id,
-                    observacoes=observacoes if i == 0 else None,  # Observação só no primeiro
-                    valor_total=float(servico.preco)
-                )
-                
-                agendamento.save()
-                agendamentos_criados.append(agendamento)
-                
-                # Próximo serviço começa após o atual
-                dt_atual += timedelta(minutes=duracao_servico)
-            
-            return {
-                "sucesso": True,
-                "agendamentos": [ag.to_dict() for ag in agendamentos_criados],
-                "valor_total": valor_total,
-                "duracao_total": duracao_total
-            }
-            
-        except Exception as e:
-            return {"erro": f"Erro interno: {str(e)}"}
-    
-    @staticmethod
-    def cancelar_agendamento(agendamento_id: int, user_id: int) -> Dict:
+            if not _verificar_disponibilidade_edicao(
+                dados_atualizados.id_profissional, 
+                dados_atualizados.dt_atendimento, 
+                dt_fim,
+                agendamento_id
+            ):
+                raise Exception("Horário não disponível para o profissional")
+        
+        # Atualizar campos
+        agendamento_existente.dt_atendimento = dados_atualizados.dt_atendimento
+        agendamento_existente.id_user = dados_atualizados.id_user
+        agendamento_existente.id_profissional = dados_atualizados.id_profissional
+        agendamento_existente.id_servico = dados_atualizados.id_servico
+        agendamento_existente.valor_total = dados_atualizados.valor_total
+        
+        db.session.commit()
+        return agendamento_existente
+        
+    except Exception as e:
+        db.session.rollback()
+        raise Exception(str(e))
 
-        try:
-            agendamento = AgendamentoModel.find_by_id(agendamento_id)
-            
-            if not agendamento:
-                return {"erro": "Agendamento não encontrado"}
-            
-            if agendamento.id_user != user_id:
-                return {"erro": "Acesso negado: agendamento não pertence ao usuário"}
-            
-            if agendamento.status == 'cancelado':
-                return {"erro": "Agendamento já foi cancelado"}
-            
-            if agendamento.status == 'finalizado':
-                return {"erro": "Não é possível cancelar um agendamento finalizado"}
-            
-            # Calcular taxa de cancelamento
-            servico = ServicoModel.find_by_id(agendamento.id_servico)
-            taxa = 0.0
-            
-            if not agendamento.pode_cancelar_gratuito():
-                taxa = agendamento.calcular_taxa_cancelamento(float(servico.preco))
-            
-            # Atualizar agendamento
-            agendamento.update(
-                status='cancelado',
-                taxa_cancelamento=taxa
-            )
-            
-            return {
-                "sucesso": True,
-                "agendamento": agendamento.to_dict(),
-                "taxa_cancelamento": taxa,
-                "cancelamento_gratuito": taxa == 0
-            }
-            
-        except Exception as e:
-            return {"erro": f"Erro interno: {str(e)}"}
-    
-    @staticmethod
-    def listar_horarios_disponiveis(profissional_id: int, data: datetime.date) -> Dict:
 
-        try:
-            # Verificar se profissional existe
-            if not ProfissionalModel.find_by_id(profissional_id):
-                return {"erro": "Profissional não encontrado"}
-            
-            # Buscar agendamentos do dia
-            agendamentos = AgendamentoModel.find_by_profissional_data(profissional_id, data)
-            
-            # Gerar slots de horário (intervalos de 30 min)
-            horarios_disponiveis = []
-            horarios_ocupados = set()
-            
-            # Marcar horários ocupados
-            for agendamento in agendamentos:
-                servico = ServicoModel.find_by_id(agendamento.id_servico)
-                duracao = AgendamentoService.DURACAO_SERVICOS.get(
-                    servico.nome.lower(), 60)
-                
-                inicio = agendamento.dt_atendimento
-                fim = inicio + timedelta(minutes=duracao)
-                
-                # Marcar todos os slots ocupados
-                slot_atual = inicio
-                while slot_atual < fim:
-                    horarios_ocupados.add(slot_atual.strftime("%H:%M"))
-                    slot_atual += timedelta(minutes=30)
-            
-            # Gerar horários disponíveis
-            data_completa = datetime.combine(data, time(AgendamentoService.HORA_ABERTURA))
-            
-            while data_completa.hour < AgendamentoService.HORA_FECHAMENTO:
-                # Pular horário de almoço
-                if (data_completa.hour >= AgendamentoService.HORA_ALMOCO_INICIO and 
-                    data_completa.hour < AgendamentoService.HORA_ALMOCO_FIM):
-                    data_completa += timedelta(minutes=30)
-                    continue
-                
-                horario_str = data_completa.strftime("%H:%M")
-                
-                if horario_str not in horarios_ocupados:
-                    horarios_disponiveis.append({
-                        "horario": horario_str,
-                        "timestamp": data_completa.isoformat()
-                    })
-                
-                data_completa += timedelta(minutes=30)
-            
-            return {
-                "sucesso": True,
-                "data": data.isoformat(),
-                "horarios_disponiveis": horarios_disponiveis
-            }
-            
-        except Exception as e:
-            return {"erro": f"Erro interno: {str(e)}"}
-    
-    @staticmethod
-    def listar_agendamentos_usuario(user_id: int, 
-                                   status: str = None,
-                                   data_inicio: datetime = None,
-                                   data_fim: datetime = None) -> Dict:
+def excluir_agendamento(agendamento_id: int):
+    """
+    Exclui um agendamento (cancelamento)
+    """
+    try:
+        agendamento = AgendamentoModel.query.get(agendamento_id)
+        if not agendamento:
+            raise Exception("Agendamento não encontrado")
+        
+        if agendamento.status == 'cancelado':
+            raise Exception("Agendamento já foi cancelado")
+        
+        if agendamento.status == 'concluido':
+            raise Exception("Não é possível cancelar um agendamento concluído")
+        
+        # Calcular taxa de cancelamento se necessário
+        servico = ServicoModel.query.get(agendamento.id_servico)
+        taxa = 0.0
+        
+        if not _pode_cancelar_gratuito(agendamento):
+            taxa = _calcular_taxa_cancelamento(float(servico.valor))
+        
+        # Atualizar status para cancelado
+        agendamento.status = 'cancelado'
+        agendamento.taxa_cancelamento = taxa
+        
+        db.session.commit()
+        
+    except Exception as e:
+        db.session.rollback()
+        raise Exception(str(e))
 
-        try:
-            agendamentos = AgendamentoModel.find_by_user(user_id)
-            
-            # Aplicar filtros
-            if status:
-                agendamentos = [ag for ag in agendamentos if ag.status == status]
-            
-            if data_inicio:
-                agendamentos = [ag for ag in agendamentos 
-                               if ag.dt_atendimento >= data_inicio]
-            
-            if data_fim:
-                agendamentos = [ag for ag in agendamentos 
-                               if ag.dt_atendimento <= data_fim]
-            
-            # Enriquecer dados
-            agendamentos_detalhados = []
-            for agendamento in agendamentos:
-                ag_dict = agendamento.to_dict()
-                
-                # Adicionar dados do serviço
-                servico = ServicoModel.find_by_id(agendamento.id_servico)
-                ag_dict['servico'] = {
-                    'nome': servico.nome,
-                    'preco': float(servico.preco),
-                    'duracao': AgendamentoService.DURACAO_SERVICOS.get(
-                        servico.nome.lower(), 60)
-                }
-                
-                # Adicionar dados do profissional
-                profissional = ProfissionalModel.find_by_id(agendamento.id_profissional)
-                ag_dict['profissional'] = {
-                    'nome': profissional.nome,
-                    'especialidade': profissional.especialidade
-                }
-                
-                agendamentos_detalhados.append(ag_dict)
-            
-            return {
-                "sucesso": True,
-                "agendamentos": agendamentos_detalhados
-            }
-            
-        except Exception as e:
-            return {"erro": f"Erro interno: {str(e)}"}
-    
-    @staticmethod
-    def _validar_dados_basicos(dt_atendimento: datetime, id_user: int,
-                              id_profissional: int, servicos_ids: List[int]) -> bool:
 
-        if not isinstance(dt_atendimento, datetime):
-            return False
+def listar_horarios_disponiveis(profissional_id: int, data_str: str) -> Dict:
+    """
+    Lista horários disponíveis para um profissional em uma data específica
+    """
+    try:
+        # Converter string para date
+        data = datetime.strptime(data_str, '%Y-%m-%d').date()
         
-        if not isinstance(id_user, int) or id_user <= 0:
-            return False
+        # Verificar se profissional existe
+        profissional = ProfissionalModel.query.get(profissional_id)
+        if not profissional:
+            raise Exception("Profissional não encontrado")
         
-        if not isinstance(id_profissional, int) or id_profissional <= 0:
-            return False
+        # Buscar agendamentos do dia
+        data_inicio = datetime.combine(data, time.min)
+        data_fim = datetime.combine(data, time.max)
         
-        if not servicos_ids or not isinstance(servicos_ids, list):
-            return False
-        
-        return True
-    
-    @staticmethod
-    def _verificar_horario_funcionamento(dt_atendimento: datetime) -> bool:
-
-        hora = dt_atendimento.hour
-        
-        # Verificar se está no horário de funcionamento
-        if hora < AgendamentoService.HORA_ABERTURA or hora >= AgendamentoService.HORA_FECHAMENTO:
-            return False
-        
-        # Verificar se não é horário de almoço
-        if (hora >= AgendamentoService.HORA_ALMOCO_INICIO and 
-            hora < AgendamentoService.HORA_ALMOCO_FIM):
-            return False
-        
-        return True
-    
-    @staticmethod
-    def _verificar_disponibilidade(profissional_id: int, dt_inicio: datetime,
-                                  dt_fim: datetime) -> bool:
-
-        agendamentos_conflito = AgendamentoModel.query.filter(
+        agendamentos = AgendamentoModel.query.filter(
             AgendamentoModel.id_profissional == profissional_id,
-            AgendamentoModel.status != 'cancelado',
-            AgendamentoModel.dt_atendimento < dt_fim
+            AgendamentoModel.dt_atendimento >= data_inicio,
+            AgendamentoModel.dt_atendimento <= data_fim,
+            AgendamentoModel.status != 'cancelado'
         ).all()
         
-        for agendamento in agendamentos_conflito:
-            # Calcular fim do agendamento existente
-            servico = ServicoModel.find_by_id(agendamento.id_servico)
-            duracao = AgendamentoService.DURACAO_SERVICOS.get(
-                servico.nome.lower(), 60)
-            ag_fim = agendamento.dt_atendimento + timedelta(minutes=duracao)
-            
-            # Verificar sobreposição
-            if not (dt_fim <= agendamento.dt_atendimento or dt_inicio >= ag_fim):
-                return False
+        # Gerar slots de horário (intervalos de 30 min)
+        horarios_disponiveis = []
+        horarios_ocupados = set()
         
-        return True
+        # Marcar horários ocupados
+        for agendamento in agendamentos:
+            servico = ServicoModel.query.get(agendamento.id_servico)
+            duracao = _obter_duracao_servico(servico)
+            
+            inicio = agendamento.dt_atendimento
+            fim = inicio + timedelta(minutes=duracao)
+            
+            # Marcar todos os slots ocupados
+            slot_atual = inicio
+            while slot_atual < fim:
+                horarios_ocupados.add(slot_atual.strftime("%H:%M"))
+                slot_atual += timedelta(minutes=30)
+        
+        # Gerar horários disponíveis
+        data_completa = datetime.combine(data, time(AgendamentoService.HORA_ABERTURA))
+        
+        while data_completa.hour < AgendamentoService.HORA_FECHAMENTO:
+            # Pular horário de almoço
+            if (data_completa.hour >= AgendamentoService.HORA_ALMOCO_INICIO and 
+                data_completa.hour < AgendamentoService.HORA_ALMOCO_FIM):
+                data_completa += timedelta(minutes=30)
+                continue
+            
+            horario_str = data_completa.strftime("%H:%M")
+            
+            if horario_str not in horarios_ocupados:
+                horarios_disponiveis.append({
+                    "horario": horario_str,
+                    "timestamp": data_completa.isoformat()
+                })
+            
+            data_completa += timedelta(minutes=30)
+        
+        return {
+            "data": data.isoformat(),
+            "horarios_disponiveis": horarios_disponiveis
+        }
+        
+    except Exception as e:
+        raise Exception(f"Erro ao listar horários disponíveis: {str(e)}")
+
+
+def listar_agendamentos_usuario(user_id: int, status: str = None) -> List:
+    """
+    Lista agendamentos de um usuário específico
+    """
+    try:
+        query = AgendamentoModel.query.filter_by(id_user=user_id)
+        
+        if status:
+            query = query.filter_by(status=status)
+        
+        return query.all()
+        
+    except Exception as e:
+        raise Exception(f"Erro ao listar agendamentos do usuário: {str(e)}")
+
+
+# Funções auxiliares privadas
+def _validar_dados_basicos(dt_atendimento: datetime, id_user: int,
+                          id_profissional: int, id_servico: int) -> bool:
+    """Valida dados básicos do agendamento"""
+    if not isinstance(dt_atendimento, datetime):
+        return False
+    
+    if not isinstance(id_user, int) or id_user <= 0:
+        return False
+    
+    if not isinstance(id_profissional, int) or id_profissional <= 0:
+        return False
+    
+    if not isinstance(id_servico, int) or id_servico <= 0:
+        return False
+    
+    return True
+
+
+def _verificar_horario_funcionamento(dt_atendimento: datetime) -> bool:
+    """Verifica se o horário está dentro do funcionamento"""
+    hora = dt_atendimento.hour
+    
+    # Verificar se está no horário de funcionamento
+    if hora < AgendamentoService.HORA_ABERTURA or hora >= AgendamentoService.HORA_FECHAMENTO:
+        return False
+    
+    # Verificar se não é horário de almoço
+    if (hora >= AgendamentoService.HORA_ALMOCO_INICIO and 
+        hora < AgendamentoService.HORA_ALMOCO_FIM):
+        return False
+    
+    return True
+
+
+def _verificar_disponibilidade(profissional_id: int, dt_inicio: datetime,
+                              dt_fim: datetime) -> bool:
+    """Verifica se o horário está disponível para o profissional"""
+    agendamentos_conflito = AgendamentoModel.query.filter(
+        AgendamentoModel.id_profissional == profissional_id,
+        AgendamentoModel.status != 'cancelado',
+        AgendamentoModel.dt_atendimento < dt_fim
+    ).all()
+    
+    for agendamento in agendamentos_conflito:
+        # Calcular fim do agendamento existente
+        servico = ServicoModel.query.get(agendamento.id_servico)
+        duracao = _obter_duracao_servico(servico)
+        ag_fim = agendamento.dt_atendimento + timedelta(minutes=duracao)
+        
+        # Verificar sobreposição
+        if not (dt_fim <= agendamento.dt_atendimento or dt_inicio >= ag_fim):
+            return False
+    
+    return True
+
+
+def _verificar_disponibilidade_edicao(profissional_id: int, dt_inicio: datetime,
+                                     dt_fim: datetime, agendamento_id: int) -> bool:
+    """Verifica disponibilidade excluindo o próprio agendamento que está sendo editado"""
+    agendamentos_conflito = AgendamentoModel.query.filter(
+        AgendamentoModel.id_profissional == profissional_id,
+        AgendamentoModel.status != 'cancelado',
+        AgendamentoModel.dt_atendimento < dt_fim,
+        AgendamentoModel.id != agendamento_id  # Excluir o próprio agendamento
+    ).all()
+    
+    for agendamento in agendamentos_conflito:
+        # Calcular fim do agendamento existente
+        servico = ServicoModel.query.get(agendamento.id_servico)
+        duracao = _obter_duracao_servico(servico)
+        ag_fim = agendamento.dt_atendimento + timedelta(minutes=duracao)
+        
+        # Verificar sobreposição
+        if not (dt_fim <= agendamento.dt_atendimento or dt_inicio >= ag_fim):
+            return False
+    
+    return True
+
+
+def _pode_cancelar_gratuito(agendamento) -> bool:
+    """Verifica se o cancelamento pode ser gratuito (mais de 24h de antecedência)"""
+    agora = datetime.utcnow()
+    diferenca = agendamento.dt_atendimento - agora
+    return diferenca.total_seconds() > 24 * 3600  # 24 horas em segundos
+
+
+def _calcular_taxa_cancelamento(valor_servico: float) -> float:
+    """Calcula taxa de cancelamento (20% do valor do serviço)"""
+    return valor_servico * 0.20
